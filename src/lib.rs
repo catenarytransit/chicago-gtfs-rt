@@ -35,7 +35,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_train_feed() {
-        let train_feeds = train_feed(reqwest::Client::new(),"Det2nqw85D8TqxqF6SpcYYjfu").await;
+        let train_feeds = train_feed(reqwest::Client::new(),"13f685e4b9054545b19470556103ec73").await;
 
         assert!(train_feeds.is_ok());
     }
