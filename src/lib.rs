@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone)]
 pub struct ChicagoResults {
-    vehicle_positions: FeedMessage,
-    trip_updates: FeedMessage,
+   pub vehicle_positions: FeedMessage,
+   pub trip_updates: FeedMessage,
 }
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
