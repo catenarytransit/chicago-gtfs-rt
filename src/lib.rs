@@ -4,6 +4,13 @@ use serde::Deserialize;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+    }
+}
 #[derive(Debug, Clone)]
 pub struct ChicagoResults {
    pub vehicle_positions: FeedMessage,
@@ -127,8 +134,8 @@ pub async fn train_feed(
                             vehicle: Some(gtfs_rt::VehiclePosition {
                                 trip: Some(gtfs_rt::TripDescriptor {
                                     modified_trip: None,
-                                    trip_id: Some(String::from("")),
-                                    route_id: Some(train_line_group.route_name.clone()),
+                                    trip_id: None,
+                                    route_id: Some(capitalize(&train_line_group.route_name)),
                                     direction_id: None,
                                     start_time: None,
                                     start_date: None,
