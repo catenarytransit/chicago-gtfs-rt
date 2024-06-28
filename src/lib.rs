@@ -61,7 +61,7 @@ struct TTPosTrain {
 const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
 
 pub async fn train_feed(
-    client: reqwest::Client,
+    client: &reqwest::Client,
     key: &str,
 ) -> Result<ChicagoResults, Box<dyn std::error::Error + Sync + Send>> {
     println!("running func");
@@ -120,10 +120,13 @@ pub async fn train_feed(
                     if let Ok(lon) = lon {
                         let entity: FeedEntity = FeedEntity {
                             id: train.rn.clone(),
+                            stop: None,
+                            trip_modifications: None,
                             is_deleted: None,
                             trip_update: None,
                             vehicle: Some(gtfs_rt::VehiclePosition {
                                 trip: Some(gtfs_rt::TripDescriptor {
+                                    modified_trip: None,
                                     trip_id: None,
                                     route_id: Some(train_line_group.route_name.clone()),
                                     direction_id: None,
@@ -209,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn test_train_feed() {
         let train_feeds = train_feed(
-            reqwest::ClientBuilder::new()
+            &reqwest::ClientBuilder::new()
                 .use_rustls_tls()
                 .deflate(true)
                 .gzip(true)
