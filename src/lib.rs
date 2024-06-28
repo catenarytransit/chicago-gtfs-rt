@@ -10,12 +10,12 @@ pub struct ChicagoResults {
     trip_updates: FeedMessage,
 }
 
-#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct TTPos {
     ctatt: TTPosInner,
 }
 
-#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct TTPosInner {
     tmst: String,
     errCd: String,
@@ -23,7 +23,7 @@ struct TTPosInner {
     route: Vec<TTPosRoute>,
 }
 
-#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct TTPosRoute {
     //named @name
     #[serde(rename(deserialize = "@name"))]
@@ -31,7 +31,7 @@ struct TTPosRoute {
     train: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct TTPosTrain {
     rn: String,
     #[serde(rename(deserialize = "destSt"))]
