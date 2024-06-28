@@ -127,7 +127,7 @@ pub async fn train_feed(
                             vehicle: Some(gtfs_rt::VehiclePosition {
                                 trip: Some(gtfs_rt::TripDescriptor {
                                     modified_trip: None,
-                                    trip_id: None,
+                                    trip_id: Some(String::from("")),
                                     route_id: Some(train_line_group.route_name.clone()),
                                     direction_id: None,
                                     start_time: None,
