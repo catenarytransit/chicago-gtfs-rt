@@ -1,21 +1,21 @@
 use gtfs_rt::{FeedEntity, FeedHeader, FeedMessage, VehiclePosition};
 use inline_colorization::*;
 use serde::Deserialize;
+use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{error::Error};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChicagoResults {
     vehicle_positions: FeedMessage,
     trip_updates: FeedMessage,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 struct TTPos {
     ctatt: TTPosInner,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 struct TTPosInner {
     tmst: String,
     errCd: String,
@@ -23,7 +23,7 @@ struct TTPosInner {
     route: Vec<TTPosRoute>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 struct TTPosRoute {
     //named @name
     #[serde(rename(deserialize = "@name"))]
@@ -31,7 +31,7 @@ struct TTPosRoute {
     train: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 struct TTPosTrain {
     rn: String,
     #[serde(rename(deserialize = "destSt"))]
