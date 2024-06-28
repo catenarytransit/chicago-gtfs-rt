@@ -1,7 +1,8 @@
-use gtfs_rt::FeedMessage;
-use std::{error::Error, io::Error};
+use gtfs_rt::{FeedEntity, FeedHeader, FeedMessage, VehiclePosition};
 use inline_colorization::*;
-use serde::{Deserialize};
+use serde::Deserialize;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{error::Error};
 
 #[derive(Debug)]
 pub struct ChicagoResults {
@@ -9,28 +10,28 @@ pub struct ChicagoResults {
     trip_updates: FeedMessage,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TTPos {
-    ctatt: TTPosInner
-} 
+    ctatt: TTPosInner,
+}
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TTPosInner {
     tmst: String,
     errCd: String,
     errNm: Option<String>,
-    route: Vec<TTPosRoute>
+    route: Vec<TTPosRoute>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TTPosRoute {
     //named @name
     #[serde(rename(deserialize = "@name"))]
     route_name: String,
-    train: Vec<TTPosTrain>
+    train: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TTPosTrain {
     rn: String,
     #[serde(rename(deserialize = "destSt"))]
@@ -54,7 +55,7 @@ struct TTPosTrain {
     is_dly: String,
     lat: String,
     lon: String,
-    heading: String
+    heading: String,
 }
 
 const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
@@ -62,11 +63,11 @@ const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
 pub async fn train_feed(
     client: reqwest::Client,
     key: &str,
-) -> Result<ChicagoResults, Box<dyn std::error::Error>> {
+) -> Result<ChicagoResults, Box<dyn std::error::Error + Sync + Send>> {
     println!("running func");
 
     let response = client
-         .get("https://www.transitchicago.com/api/1.0/ttpositions.aspx")
+        .get("https://www.transitchicago.com/api/1.0/ttpositions.aspx")
         .query(&[
             ("key", &key),
             ("rt", &alltrainlines),
@@ -75,34 +76,130 @@ pub async fn train_feed(
         .send()
         .await;
 
-    if response.is_err() {
-        let response = response.as_ref().unwrap_err();
-        println!("{color_magenta}{:#?}{color_reset}", response.url().unwrap().as_str());
-        println!("{:#?}", response);
+    if let Err(response) = &response {
+        println!(
+            "{color_magenta}{:#?}{color_reset}",
+            response.url().unwrap().as_str()
+        );
+        //  println!("{:?}", response);
     }
 
-    match response {
-        Ok(response) => {
-            //println!("{color_magenta}{:#?}{color_reset}", response.url().as_str());
-            //println!("{:?}", response.text().await);
-            let text = response.text().await;
-            match text {
-                Ok(text) => { 
-                    let json_output = serde_json::from_str::<TTPos>(text.as_str());
+    let response = response?;
+    let text = response.text().await?;
+    let json_output = serde_json::from_str::<TTPos>(text.as_str())?;
 
-                    Err(Box::new(
-                        std::io::Error::new(std::io::ErrorKind::Unsupported,"not implemented yet")
-                    ))
-                },
-                Err(text) => {
-                    Err(Box::new(
-                        text,
-                    ))
+    println!("{:#?}", json_output);
+
+    //Vec<TTPosTrain> or TTPosTrain
+
+    let mut train_positions: Vec<FeedEntity> = vec![];
+
+    for train_line_group in json_output.ctatt.route {
+        if let Some(train_value) = train_line_group.train {
+            let train_data_vec: Vec<TTPosTrain> = match &train_value {
+                serde_json::Value::Object(train_map) => {
+                    match serde_json::from_value::<TTPosTrain>(train_value) {
+                        Err(_) => vec![],
+                        Ok(valid_train_map) => vec![valid_train_map],
+                    }
+                }
+                serde_json::Value::Array(train_map) => {
+                    match serde_json::from_value::<Vec<TTPosTrain>>(train_value) {
+                        Err(_) => vec![],
+                        Ok(valid_train_map) => valid_train_map,
+                    }
+                }
+                _ => vec![],
+            };
+
+            for train in &train_data_vec {
+                let lat = train.lat.parse::<f32>();
+                let lon = train.lon.parse::<f32>();
+
+                if let Ok(lat) = lat {
+                    if let Ok(lon) = lon {
+                        let entity: FeedEntity = FeedEntity {
+                            id: train.rn.clone(),
+                            is_deleted: None,
+                            trip_update: None,
+                            vehicle: Some(gtfs_rt::VehiclePosition {
+                                trip: Some(gtfs_rt::TripDescriptor {
+                                    trip_id: None,
+                                    route_id: Some(train_line_group.route_name.clone()),
+                                    direction_id: None,
+                                    start_time: None,
+                                    start_date: None,
+                                    schedule_relationship: None,
+                                }),
+                                vehicle: Some(gtfs_rt::VehicleDescriptor {
+                                    id: Some(train.rn.clone()),
+                                    label: None,
+                                    license_plate: None,
+                                    wheelchair_accessible: None,
+                                }),
+                                position: Some(gtfs_rt::Position {
+                                    latitude: lat,
+                                    longitude: lon,
+                                    bearing: match train.heading.parse::<f32>() {
+                                        Ok(bearing) => Some(bearing),
+                                        _ => None,
+                                    },
+                                    odometer: None,
+                                    speed: None,
+                                }),
+                                current_status: None,
+                                current_stop_sequence: None,
+                                stop_id: None,
+                                timestamp: Some(
+                                    SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .expect("Time went backwards")
+                                        .as_secs(),
+                                ),
+                                congestion_level: None,
+                                occupancy_percentage: None,
+                                occupancy_status: None,
+                                multi_carriage_details: vec![],
+                            }),
+                            alert: None,
+                            shape: None,
+                        };
+
+                        train_positions.push(entity);
+                    }
                 }
             }
         }
-        Err(err) => Err(Box::new("NaN".parse::<u32>().unwrap_err())),
     }
+
+    Ok(ChicagoResults {
+        vehicle_positions: gtfs_rt::FeedMessage {
+            entity: train_positions,
+            header: gtfs_rt::FeedHeader {
+                timestamp: Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_secs(),
+                ),
+                gtfs_realtime_version: String::from("2.0"),
+                incrementality: None,
+            },
+        },
+        trip_updates: gtfs_rt::FeedMessage {
+            entity: vec![],
+            header: gtfs_rt::FeedHeader {
+                timestamp: Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_secs(),
+                ),
+                gtfs_realtime_version: String::from("2.0"),
+                incrementality: None,
+            },
+        },
+    })
 }
 
 #[cfg(test)]
@@ -124,5 +221,19 @@ mod tests {
         .await;
 
         assert!(train_feeds.is_ok());
+
+        println!("{:#?}", train_feeds);
     }
+
+    /*
+    #[tokio::test]
+    async fn test_bus_feed() {
+        let api_key = "Det2nqw85D8TqxqF6SpcYYjfu";
+
+        let bus = reqwest::get(
+            "https://www.ctabustracker.com/bustime/api/v2/getvehicles?key=Det2nqw85D8TqxqF6SpcYYjfu&rt=1"
+        ).await.unwrap().text().await.unwrap();
+
+        println!("{}", bus);
+    }*/
 }
