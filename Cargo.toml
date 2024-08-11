@@ -1,6 +1,6 @@
 [package]
 name = "chicago-gtfs-rt"
-version = "0.1.5-alpha"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0"
 description = "Conversion of all Chicago Transit Authority data into GTFS Realtime"
@@ -8,7 +8,7 @@ description = "Conversion of all Chicago Transit Authority data into GTFS Realti
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gtfs-rt = "0.5.0"
+gtfs-realtime = "0.1.0"
 tokio = { features = ["full"], version = "1.35.0" }
 reqwest = {version = "0.12.5", features = ["deflate","gzip","brotli","rustls-tls"]}
 inline_colorization = "0.1.6"

@@ -1,4 +1,4 @@
-use gtfs_rt::{FeedEntity, FeedHeader, FeedMessage, VehiclePosition};
+use gtfs_realtime::{FeedEntity, FeedHeader, FeedMessage, VehiclePosition};
 use inline_colorization::*;
 use serde::Deserialize;
 use std::error::Error;
@@ -131,8 +131,8 @@ pub async fn train_feed(
                             trip_modifications: None,
                             is_deleted: None,
                             trip_update: None,
-                            vehicle: Some(gtfs_rt::VehiclePosition {
-                                trip: Some(gtfs_rt::TripDescriptor {
+                            vehicle: Some(gtfs_realtime::VehiclePosition {
+                                trip: Some(gtfs_realtime::TripDescriptor {
                                     modified_trip: None,
                                     trip_id: None,
                                     route_id: Some(capitalize(&train_line_group.route_name)),
@@ -141,13 +141,13 @@ pub async fn train_feed(
                                     start_date: None,
                                     schedule_relationship: None,
                                 }),
-                                vehicle: Some(gtfs_rt::VehicleDescriptor {
+                                vehicle: Some(gtfs_realtime::VehicleDescriptor {
                                     id: Some(train.rn.clone()),
                                     label: None,
                                     license_plate: None,
                                     wheelchair_accessible: None,
                                 }),
-                                position: Some(gtfs_rt::Position {
+                                position: Some(gtfs_realtime::Position {
                                     latitude: lat,
                                     longitude: lon,
                                     bearing: match train.heading.parse::<f32>() {
@@ -183,9 +183,9 @@ pub async fn train_feed(
     }
 
     Ok(ChicagoResults {
-        vehicle_positions: gtfs_rt::FeedMessage {
+        vehicle_positions: gtfs_realtime::FeedMessage {
             entity: train_positions,
-            header: gtfs_rt::FeedHeader {
+            header: gtfs_realtime::FeedHeader {
                 timestamp: Some(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -196,9 +196,9 @@ pub async fn train_feed(
                 incrementality: None,
             },
         },
-        trip_updates: gtfs_rt::FeedMessage {
+        trip_updates: gtfs_realtime::FeedMessage {
             entity: vec![],
-            header: gtfs_rt::FeedHeader {
+            header: gtfs_realtime::FeedHeader {
                 timestamp: Some(
                     SystemTime::now()
                         .duration_since(UNIX_EPOCH)
