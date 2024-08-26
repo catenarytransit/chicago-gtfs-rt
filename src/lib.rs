@@ -14,8 +14,8 @@ pub fn capitalize(s: &str) -> String {
 }
 #[derive(Debug, Clone)]
 pub struct ChicagoResults {
-   pub vehicle_positions: FeedMessage,
-   pub trip_updates: FeedMessage,
+    pub vehicle_positions: FeedMessage,
+    pub trip_updates: FeedMessage,
 }
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -71,7 +71,7 @@ const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
 pub async fn train_feed(
     client: &reqwest::Client,
     key: &str,
-    trips: &str
+    trips: &str,
 ) -> Result<ChicagoResults, Box<dyn std::error::Error + Sync + Send>> {
     let mut trip_data_raw = csv::Reader::from_reader(trips.as_bytes());
     let trip_data = trip_data_raw.records();
@@ -230,26 +230,55 @@ pub async fn train_feed(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
+    use reqwest::Client;
+    use std::{fs, io, path::Path};
+    use zip::ZipArchive;
 
     #[tokio::test]
     async fn test_train_feed() {
-        let trips_file_data = fs::read_to_string("static/trips.txt");
+        // let trips_file_data = fs::read_to_string("static/trips.txt");
 
-        let train_feeds = train_feed(
-            &reqwest::ClientBuilder::new()
-                .use_rustls_tls()
-                .deflate(true)
-                .gzip(true)
-                .brotli(true)
-                .build()
-                .unwrap(),
-            "13f685e4b9054545b19470556103ec73",
-            &trips_file_data.expect("Bad trips file")
-        )
-        .await;
+        println!("Downloading schedule");
+
+        let chicago_gtfs = "https://www.transitchicago.com/downloads/sch_data/google_transit.zip";
+
+        let client = reqwest::ClientBuilder::new()
+            .use_rustls_tls()
+            .deflate(true)
+            .gzip(true)
+            .brotli(true)
+            .build()
+            .unwrap();
+
+        let response = client
+            .get(chicago_gtfs)
+            .send()
+            .await
+            .expect("download failed");
+        let bytes = response.bytes().await.expect("Could not parse bytes");
+
+        println!("extracting");
+
+        // Create a ZIP archive from the bytes
+        let mut archive = ZipArchive::new( io::Cursor::new(bytes)).unwrap();
+
+        // Find and open the desired file
+        let mut trips_file = archive
+            .by_name("trips.txt")
+            .expect("trips.txt doesn't exist");
+        let mut buffer = Vec::new();
+        io::copy(&mut trips_file, &mut buffer).unwrap();
+
+        // Convert the buffer to a string
+        let trips_content = String::from_utf8(buffer).unwrap();
+
+        println!("computing trips...");
+
+        //give to train feeds now
+
+        let train_feeds =
+            train_feed(&client, "13f685e4b9054545b19470556103ec73", &trips_content).await;
 
         assert!(train_feeds.is_ok());
 
