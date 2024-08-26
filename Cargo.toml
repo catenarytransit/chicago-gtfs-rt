@@ -1,8 +1,9 @@
 [package]
 name = "chicago-gtfs-rt"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "AGPL-3.0"
+authors = ["Samuel Sharp <samuel@catenarymaps.org>", "Kyler Chin <kyler@catenarymaps.org>"]
 description = "Conversion of all Chicago Transit Authority data into GTFS Realtime"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
