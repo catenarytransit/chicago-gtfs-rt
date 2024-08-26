@@ -1,6 +1,7 @@
 use gtfs_realtime::{FeedEntity, FeedHeader, FeedMessage, VehiclePosition};
 use inline_colorization::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::error::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,8 +71,22 @@ const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
 pub async fn train_feed(
     client: &reqwest::Client,
     key: &str,
+    trips: &str
 ) -> Result<ChicagoResults, Box<dyn std::error::Error + Sync + Send>> {
-    println!("running func");
+    let mut trip_data_raw = csv::Reader::from_reader(trips.as_bytes());
+    let trip_data = trip_data_raw.records();
+
+    let mut run_ids: HashMap<u16, String> = HashMap::new();
+
+    for record in trip_data {
+        let record = record?;
+        if record[8].contains('R') {
+            let final_run = record[8].replace("R", "");
+            let final_trip = record[2].to_string();
+
+            run_ids.insert(final_run.parse::<u16>().unwrap(), final_trip);
+        }
+    }
 
     let response = client
         .get("https://www.transitchicago.com/api/1.0/ttpositions.aspx")
@@ -94,8 +109,6 @@ pub async fn train_feed(
     let response = response?;
     let text = response.text().await?;
     let json_output = serde_json::from_str::<TTPos>(text.as_str())?;
-
-    println!("{:#?}", json_output);
 
     //Vec<TTPosTrain> or TTPosTrain
 
@@ -123,6 +136,9 @@ pub async fn train_feed(
                 let lat = train.lat.parse::<f32>();
                 let lon = train.lon.parse::<f32>();
 
+                let train_run_id = train.rn.parse::<u16>().unwrap();
+                let train_trip_id = run_ids.get(&train_run_id);
+
                 if let Ok(lat) = lat {
                     if let Ok(lon) = lon {
                         let entity: FeedEntity = FeedEntity {
@@ -134,9 +150,9 @@ pub async fn train_feed(
                             vehicle: Some(gtfs_realtime::VehiclePosition {
                                 trip: Some(gtfs_realtime::TripDescriptor {
                                     modified_trip: None,
-                                    trip_id: None,
+                                    trip_id: train_trip_id.cloned(),
                                     route_id: Some(capitalize(&train_line_group.route_name)),
-                                    direction_id: None,
+                                    direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
                                     start_time: None,
                                     start_date: None,
                                     schedule_relationship: None,
@@ -214,10 +230,14 @@ pub async fn train_feed(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[tokio::test]
     async fn test_train_feed() {
+        let trips_file_data = fs::read_to_string("static/trips.txt");
+
         let train_feeds = train_feed(
             &reqwest::ClientBuilder::new()
                 .use_rustls_tls()
@@ -227,6 +247,7 @@ mod tests {
                 .build()
                 .unwrap(),
             "13f685e4b9054545b19470556103ec73",
+            &trips_file_data.expect("Bad trips file")
         )
         .await;
 
