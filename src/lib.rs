@@ -159,7 +159,7 @@ pub async fn train_feed(
                                 }),
                                 vehicle: Some(gtfs_realtime::VehicleDescriptor {
                                     id: Some(train.rn.clone()),
-                                    label: None,
+                                    label: Some(train.rn.clone()),
                                     license_plate: None,
                                     wheelchair_accessible: None,
                                 }),
