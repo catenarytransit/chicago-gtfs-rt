@@ -261,7 +261,7 @@ mod tests {
         println!("extracting");
 
         // Create a ZIP archive from the bytes
-        let mut archive = ZipArchive::new( io::Cursor::new(bytes)).unwrap();
+        let mut archive = ZipArchive::new(io::Cursor::new(bytes)).unwrap();
 
         // Find and open the desired file
         let mut trips_file = archive
