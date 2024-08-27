@@ -105,14 +105,26 @@ pub async fn train_feed(
                 arrival: Some(StopTimeEvent {
                     delay: None,
                     uncertainty: None,
-                    // time: Some(record[1].parse::<i64>().unwrap())
-                    time: None,
+                    time: match record.get(1) {
+                        Some(t) => match t.parse::<i64>() {
+                            Ok(t) => Some(t),
+                            Err(e) => None
+                        },
+                        None => None
+                    }
+               //     time: None,
                 }),
                 departure: Some(StopTimeEvent {
                     delay: None,
                     uncertainty: None,
-                    // time: Some(record[2].parse::<i64>().unwrap())
-                    time: None,
+                    time: match record.get(2) {
+                        Some(t) => match t.parse::<i64>() {
+                            Ok(t) => Some(t),
+                            Err(e) => None
+                        },
+                        None => None
+                    }
+                  //  time: None,
                 }),
                 departure_occupancy_status: None,
                 schedule_relationship: None,
