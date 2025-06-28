@@ -2,8 +2,11 @@ use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
 use gtfs_realtime::{FeedEntity, FeedMessage};
 use inline_colorization::*;
 use serde::Deserialize;
+use core::time;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::{DateTime, NaiveDateTime, TimeZone};
+use chrono_tz::America::Chicago;
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -67,6 +70,21 @@ struct TTPosTrain {
 }
 
 const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
+
+fn timestamp_from_str(
+    timestamp: &str,
+) -> Option<i64> {
+    let naive_time = chrono::NaiveDateTime::parse_from_str(
+        &timestamp,
+        "%Y-%m-%dT%H:%M:%S",
+    ).ok()?;
+
+    let time = chrono_tz::America::Chicago
+        .from_local_datetime(&naive_time)
+        .single()?;
+
+    Some(time.timestamp())
+}
 
 pub async fn train_feed(
     client: &reqwest::Client,
@@ -161,13 +179,14 @@ pub async fn train_feed(
     let response = response?;
     let text = response.text().await?;
     let json_output = serde_json::from_str::<TTPos>(text.as_str())?;
+    let ttpositions = json_output.ctatt;
 
     //Vec<TTPosTrain> or TTPosTrain
 
     let mut train_positions: Vec<FeedEntity> = vec![];
     let mut trip_updates: Vec<FeedEntity> = vec![];
 
-    for train_line_group in json_output.ctatt.route {
+    for train_line_group in ttpositions.route {
         if let Some(train_value) = train_line_group.train {
             let train_data_vec: Vec<TTPosTrain> = match &train_value {
                 serde_json::Value::Object(train_map) => {
@@ -191,6 +210,19 @@ pub async fn train_feed(
 
                 let train_run_id = train.rn.parse::<u16>().unwrap();
                 let train_trip_id = run_ids.get(&train_run_id);
+
+                let timestamp;
+
+                if let Some(ts) = timestamp_from_str(&train.prdt) {
+                    timestamp = Some(ts as u64);
+                } else {
+                    timestamp = Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_secs(),
+                    );
+                }
 
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
@@ -230,12 +262,7 @@ pub async fn train_feed(
                                     current_status: None,
                                     current_stop_sequence: None,
                                     stop_id: None,
-                                    timestamp: Some(
-                                        SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .expect("Time went backwards")
-                                            .as_secs(),
-                                    ),
+                                    timestamp: timestamp,
                                     congestion_level: None,
                                     occupancy_percentage: None,
                                     occupancy_status: None,
@@ -271,16 +298,22 @@ pub async fn train_feed(
                                         license_plate: None,
                                         wheelchair_accessible: None,
                                     }),
-                                    stop_time_update: trip_stops
-                                        .get(train_trip_id.expect("Trip ID matching failed"))
-                                        .expect("Trip not found")
-                                        .clone(),
-                                    timestamp: Some(
-                                        SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .expect("Time went backwards")
-                                            .as_secs(),
-                                    ),
+                                    stop_time_update: vec![
+                                        gtfs_realtime::trip_update::StopTimeUpdate {
+                                            stop_sequence: None,
+                                            stop_id: Some(train.next_stp_id.clone()),
+                                            arrival: Some(gtfs_realtime::trip_update::StopTimeEvent {
+                                                delay: None,
+                                                time: timestamp_from_str(&train.arrt),
+                                                uncertainty: None
+                                            }),
+                                            departure: None,
+                                            departure_occupancy_status: None,
+                                            schedule_relationship: None,
+                                            stop_time_properties: None
+                                        }
+                                    ],
+                                    timestamp: timestamp,
                                     delay: None,
                                     trip_properties: None,
                                 }),
