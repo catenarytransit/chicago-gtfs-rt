@@ -1,5 +1,6 @@
+use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
-use gtfs_realtime::{FeedEntity, FeedMessage};
+use gtfs_realtime::{stop, FeedEntity, FeedMessage};
 use inline_colorization::*;
 use serde::Deserialize;
 use core::time;
@@ -67,6 +68,55 @@ struct TTPosTrain {
     lat: String,
     lon: String,
     heading: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct TTFollow {
+    ctatt: TTFollowInner,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct TTFollowInner {
+    tmst: String,
+    errCd: String,
+    errNm: Option<String>,
+    position: Option<TTFollowPosition>,
+    eta: Option<Vec<TTFollowPrediction>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct TTFollowPosition {
+    lat: String,
+    lon: String,
+    heading: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct TTFollowPrediction {
+    #[serde(rename(deserialize = "staId"))]
+    sta_id: String,
+    #[serde(rename(deserialize = "stpId"))]
+    stp_id: String,
+    #[serde(rename(deserialize = "staNm"))]
+    sta_nm: String,
+    #[serde(rename(deserialize = "stpDe"))]
+    stp_de: String,
+    rn: String,
+    rt: String,
+    #[serde(rename(deserialize = "destSt"))]
+    dest_st: String,
+    #[serde(rename(deserialize = "destNm"))]
+    dest_nm: String,
+    #[serde(rename(deserialize = "trDr"))]
+    tr_dr: String,
+    prdt: String,
+    #[serde(rename(deserialize = "arrT"))]
+    arrt: String,
+    #[serde(rename(deserialize = "isApp"))]
+    is_app: String,
+    #[serde(rename(deserialize = "isDly"))]
+    is_dly: String,
+    flags: Option<String>,
 }
 
 const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
@@ -227,6 +277,75 @@ pub async fn train_feed(
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
                         if let Ok(lon) = lon {
+                            let response = client
+                                .get("https://www.transitchicago.com/api/1.0/ttfollow.aspx")
+                                .query(&[
+                                    ("key", &key),
+                                    ("runnumber", &train.rn.as_str()),
+                                    ("outputType", &"JSON"),
+                                ])
+                                .send()
+                                .await;
+
+                            if let Err(response) = &response {
+                                println!(
+                                    "{color_magenta}{:#?}{color_reset}",
+                                    response.url().unwrap().as_str()
+                                );
+                                //  println!("{:?}", response);
+                            }
+
+                            let response = response?;
+                            let text = response.text().await?;
+                            let json_output = serde_json::from_str::<TTFollow>(text.as_str())?;
+                            let ttfollow = json_output.ctatt;
+
+                            let mut stop_time_updates = Vec::new();
+
+                            if let Some(eta) = ttfollow.eta {
+                                for prediction in eta {
+                                    let update = StopTimeUpdate {
+                                        stop_sequence: None,
+                                        stop_id: Some(prediction.stp_id.clone()),
+                                        arrival: Some(StopTimeEvent {
+                                            delay: None,
+                                            time: timestamp_from_str(&prediction.arrt),
+                                            uncertainty: None
+                                        }),
+                                        departure: None,
+                                        departure_occupancy_status: None,
+                                        schedule_relationship: None,
+                                        stop_time_properties: None
+
+                                        // Most of these fields are still experimental and not part of the rust library yet
+                                        // stop_time_properties: Some(StopTimeProperties {
+                                        //     assigned_stop_id: None,
+                                        //     stop_headsign: &prediction.dest_nm,
+                                        //     drop_off_type: None,
+                                        //     pickup_type: None
+                                        // })
+                                    };
+                        
+                                    stop_time_updates.push(update);
+                                }
+                            } else {
+                                stop_time_updates.push(
+                                    StopTimeUpdate {
+                                        stop_sequence: None,
+                                        stop_id: Some(train.next_stp_id.clone()),
+                                        arrival: Some(StopTimeEvent {
+                                            delay: None,
+                                            time: timestamp_from_str(&train.arrt),
+                                            uncertainty: None
+                                        }),
+                                        departure: None,
+                                        departure_occupancy_status: None,
+                                        schedule_relationship: None,
+                                        stop_time_properties: None
+                                    }
+                                    );
+                            }
+
                             let pos_entity: FeedEntity = FeedEntity {
                                 id: train.rn.clone(),
                                 stop: None,
@@ -262,7 +381,7 @@ pub async fn train_feed(
                                     current_status: None,
                                     current_stop_sequence: None,
                                     stop_id: None,
-                                    timestamp: timestamp,
+                                    timestamp: timestamp_from_str(&ttfollow.tmst).map(|i| i as u64),
                                     congestion_level: None,
                                     occupancy_percentage: None,
                                     occupancy_status: None,
@@ -298,22 +417,8 @@ pub async fn train_feed(
                                         license_plate: None,
                                         wheelchair_accessible: None,
                                     }),
-                                    stop_time_update: vec![
-                                        gtfs_realtime::trip_update::StopTimeUpdate {
-                                            stop_sequence: None,
-                                            stop_id: Some(train.next_stp_id.clone()),
-                                            arrival: Some(gtfs_realtime::trip_update::StopTimeEvent {
-                                                delay: None,
-                                                time: timestamp_from_str(&train.arrt),
-                                                uncertainty: None
-                                            }),
-                                            departure: None,
-                                            departure_occupancy_status: None,
-                                            schedule_relationship: None,
-                                            stop_time_properties: None
-                                        }
-                                    ],
-                                    timestamp: timestamp,
+                                    stop_time_update: stop_time_updates,
+                                    timestamp: timestamp_from_str(&ttfollow.tmst).map(|i| i as u64),
                                     delay: None,
                                     trip_properties: None,
                                 }),
