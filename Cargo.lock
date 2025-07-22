@@ -245,7 +245,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "zip 2.4.2",
+ "zip 3.0.0",
  "zip-extract",
 ]
 
