@@ -1,6 +1,6 @@
 [package]
 name = "chicago-gtfs-rt"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 license = "AGPL-3.0"
 authors = ["Samuel Sharp <samuel@catenarymaps.org>", "Kyler Chin <kyler@catenarymaps.org>"]
@@ -9,16 +9,17 @@ description = "Conversion of all Chicago Transit Authority data into GTFS Realti
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-gtfs-realtime = "0.1.0"
-tokio = { features = ["full"], version = "1.35.0" }
-reqwest = {version = "0.12.5", features = ["deflate","gzip","brotli","rustls-tls"]}
+gtfs-realtime = "0.2.0"
+reqwest = {version = "0.12.22", features = ["deflate","gzip","brotli","rustls-tls"]}
 inline_colorization = "0.1.6"
-serde = {version = "1.0.193", features = ["derive"]}
-serde_json = "1.0.108"
-csv = "1.3.0"
+serde = {version = "1.0", features = ["derive"]}
+serde_json = "1.0"
+csv = "1.3.1"
 chrono = "0.4.41"
-chrono-tz = "0.10.3"
+chrono-tz = "0.10.4"
+gtfs-structures = "0.44.0"
 
 [dev-dependencies]
 zip = "2.2.0"
 zip-extract = "0.2.0"
+tokio = { features = ["full"], version = "1.46.1" }

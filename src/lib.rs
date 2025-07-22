@@ -1,13 +1,15 @@
+use chrono::Datelike;
+use chrono::{DateTime, NaiveDateTime, TimeZone};
+use chrono_tz::America::Chicago;
+use core::time;
 use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
 use gtfs_realtime::{stop, FeedEntity, FeedMessage};
 use inline_colorization::*;
 use serde::Deserialize;
-use core::time;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, NaiveDateTime, TimeZone};
-use chrono_tz::America::Chicago;
+use std::collections::HashSet;
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -78,8 +80,10 @@ struct TTFollow {
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct TTFollowInner {
     tmst: String,
-    errCd: String,
-    errNm: Option<String>,
+    #[serde(rename(deserialize = "errCd"))]
+    err_cd: String,
+    #[serde(rename(deserialize = "errNm"))]
+    err_nm: Option<String>,
     position: Option<TTFollowPosition>,
     eta: Option<Vec<TTFollowPrediction>>,
 }
@@ -119,15 +123,33 @@ struct TTFollowPrediction {
     flags: Option<String>,
 }
 
+struct InternalTripIdSearch {
+    trip_id: String,
+    service_date: chrono::NaiveDate,
+    trip_start_time: chrono::DateTime<chrono_tz::Tz>,
+}
+
+fn current_chicago_time() -> chrono::DateTime<chrono_tz::Tz> {
+    let utc = chrono::Utc::now().naive_utc();
+    chrono_tz::America::Chicago.from_utc_datetime(&utc)
+}
+
+fn midnight_chicago_from_naive_date(
+    input_date: chrono::NaiveDate,
+) -> chrono::DateTime<chrono_tz::Tz> {
+    let noon_chicago = chrono_tz::America::Chicago
+        .ymd(input_date.year(), input_date.month(), input_date.day())
+        .and_hms(12, 0, 0);
+
+    let midnight = noon_chicago - chrono::Duration::hours(12);
+
+    midnight
+}
+
 const alltrainlines: &str = "Red,P,Y,Blue,Pink,G,Org,Brn";
 
-fn timestamp_from_str(
-    timestamp: &str,
-) -> Option<i64> {
-    let naive_time = chrono::NaiveDateTime::parse_from_str(
-        &timestamp,
-        "%Y-%m-%dT%H:%M:%S",
-    ).ok()?;
+fn timestamp_from_str(timestamp: &str) -> Option<i64> {
+    let naive_time = chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%dT%H:%M:%S").ok()?;
 
     let time = chrono_tz::America::Chicago
         .from_local_datetime(&naive_time)
@@ -140,73 +162,29 @@ pub async fn train_feed(
     client: &reqwest::Client,
     key: &str,
     trips: &str,
-    stoptimes: &str,
+    gtfs: &gtfs_structures::Gtfs,
 ) -> Result<ChicagoResults, Box<dyn std::error::Error + Sync + Send>> {
     let mut trip_data_raw = csv::Reader::from_reader(trips.as_bytes());
     let trip_data = trip_data_raw.records();
 
-    let mut stop_times_raw = csv::Reader::from_reader(stoptimes.as_bytes());
-    let stop_times = stop_times_raw.records();
-
-    let mut run_ids: HashMap<u16, String> = HashMap::new();
+    let mut run_ids_to_trip_ids: HashMap<u16, Vec<String>> = HashMap::new();
 
     for record in trip_data {
         let record = record?;
+        //only identify train data
         if record[8].contains('R') {
-            let final_run = record[8].replace("R", "");
-            let final_trip = record[2].to_string();
+            let run = record[8].replace("R", "");
 
-            run_ids.insert(final_run.parse::<u16>().unwrap(), final_trip);
+            let run_number = run.parse::<u16>().unwrap();
+
+            run_ids_to_trip_ids
+                .entry(run_number)
+                .or_default()
+                .push(record[2].to_string());
         }
     }
 
-    let mut trip_stops: HashMap<String, Vec<StopTimeUpdate>> = HashMap::new();
-
-    for record in stop_times {
-        let record = record?;
-        if record[3].starts_with("3") && record[3].chars().count() == 5 {
-            let record_trip = &record[0];
-
-            let record_update = StopTimeUpdate {
-                stop_sequence: Some(record[4].parse::<u32>().unwrap()),
-                stop_id: Some(record[3].to_string()),
-                arrival: Some(StopTimeEvent {
-                    delay: None,
-                    uncertainty: None,
-                    time: match record.get(1) {
-                        Some(t) => match t.parse::<i64>() {
-                            Ok(t) => Some(t),
-                            Err(e) => None
-                        },
-                        None => None
-                    }
-               //     time: None,
-                }),
-                departure: Some(StopTimeEvent {
-                    delay: None,
-                    uncertainty: None,
-                    time: match record.get(2) {
-                        Some(t) => match t.parse::<i64>() {
-                            Ok(t) => Some(t),
-                            Err(e) => None
-                        },
-                        None => None
-                    }
-                  //  time: None,
-                }),
-                departure_occupancy_status: None,
-                schedule_relationship: None,
-                stop_time_properties: None,
-            };
-
-            trip_stops
-                .entry(record_trip.to_string())
-                .or_insert(vec![record_update.clone()])
-                .push(record_update);
-        }
-    }
-
-    // trip_stops.iter().for_each(|(k, v)| println!("Trip {} calls at {}, {}, {}, and more stops", k, v.get(0).unwrap().stop_id.as_ref().unwrap().to_string(), v.get(1).unwrap().stop_id.as_ref().unwrap().to_string(), v.get(2).unwrap().stop_id.as_ref().unwrap().to_string() ));
+    //println!("Sending req");
 
     let response = client
         .get("https://www.transitchicago.com/api/1.0/ttpositions.aspx")
@@ -217,6 +195,8 @@ pub async fn train_feed(
         ])
         .send()
         .await;
+
+    //println!("Got response");
 
     if let Err(response) = &response {
         println!(
@@ -254,25 +234,150 @@ pub async fn train_feed(
                 _ => vec![],
             };
 
+            let current_date_to_search_chicago = current_chicago_time();
+
+            let current_date = current_date_to_search_chicago.date_naive();
+
+            let search_dates_timeline = [
+                current_date.pred_opt().unwrap(),
+                current_date,
+                current_date.succ_opt().unwrap(),
+            ];
+
+            let trip_ids_to_check = run_ids_to_trip_ids
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<Vec<String>>();
+
+            let trip_raw_list = trip_ids_to_check
+                .iter()
+                .map(|trip_id| gtfs.trips.get(trip_id))
+                .filter(|x| x.is_some())
+                .map(|x| x.unwrap());
+
+            let service_ids_to_check = trip_raw_list
+                .map(|x| x.service_id.clone())
+                .collect::<HashSet<String>>();
+
+
+            let mut service_ids_to_valid_dates: HashMap<String, Vec<chrono::NaiveDate>> = HashMap::new();
+
+            for service_id in service_ids_to_check {
+                let calendar_dates_for_service_id = gtfs.calendar_dates.get(&service_id);
+
+                let calendar_for_service_id = gtfs.calendar.get(&service_id);
+
+                for date_to_check in search_dates_timeline {
+                    let mut allowed_date = false;
+
+                    match calendar_for_service_id {
+                        Some(calendar) => {
+                            let in_date_range = date_to_check <= calendar.end_date
+                                && date_to_check >= calendar.start_date;
+
+                            let match_weekday = match date_to_check.weekday() {
+                                chrono::Weekday::Mon => calendar.monday,
+                                chrono::Weekday::Tue => calendar.tuesday,
+                                chrono::Weekday::Wed => calendar.wednesday,
+                                chrono::Weekday::Thu => calendar.thursday,
+                                chrono::Weekday::Fri => calendar.friday,
+                                chrono::Weekday::Sat => calendar.saturday,
+                                chrono::Weekday::Sun => calendar.sunday,
+                            };
+
+                            let matching_date = in_date_range && match_weekday;
+
+                            if matching_date {
+                                allowed_date = true;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    match calendar_dates_for_service_id {
+                        Some(calendar_dates) => {
+                            let date_find = calendar_dates.iter().find(|x| x.date == date_to_check);
+
+                            if let Some(date_find) = date_find {
+                                match date_find.exception_type {
+                                    gtfs_structures::Exception::Added => {
+                                        allowed_date = true;
+                                    }
+                                    gtfs_structures::Exception::Deleted => {
+                                        allowed_date = false;
+                                    }
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+
+                    if allowed_date {
+                        
+                        service_ids_to_valid_dates.entry(service_id.clone())
+                        .or_default()
+                        .push(date_to_check);
+                    }
+                }
+            }
+
             for train in &train_data_vec {
                 let lat = train.lat.parse::<f32>();
                 let lon = train.lon.parse::<f32>();
 
                 let train_run_id = train.rn.parse::<u16>().unwrap();
-                let train_trip_id = run_ids.get(&train_run_id);
 
-                let timestamp;
+                let possible_trip_ids = run_ids_to_trip_ids.get(&train_run_id);
 
-                if let Some(ts) = timestamp_from_str(&train.prdt) {
-                    timestamp = Some(ts as u64);
-                } else {
-                    timestamp = Some(
+                let timestamp = match timestamp_from_str(&train.prdt) {
+                    Some(ts) => Some(ts as u64),
+                    None => Some(
                         SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .expect("Time went backwards")
                             .as_secs(),
-                    );
+                    ),
+                };
+
+                let mut ranking_trips = vec![];
+
+                if let Some(possible_trip_ids) = possible_trip_ids {
+                    for possible_trip_id in possible_trip_ids {
+                        let check_trip = gtfs.trips.get(possible_trip_id);
+    
+                        if let Some(check_trip) = check_trip {
+                            let valid_service_dates = service_ids_to_valid_dates
+                            .get(check_trip.service_id.as_str());
+    
+                        if let Some(valid_service_dates) = valid_service_dates {
+                            for valid_service_date in valid_service_dates {
+                                let midnight_chicago_from_naive_date = midnight_chicago_from_naive_date(
+                                    *valid_service_date,
+                                );
+        
+        
+        
+                                let trip_start_time = midnight_chicago_from_naive_date + chrono::Duration::seconds(check_trip.stop_times[0].departure_time.unwrap().into());
+
+                                ranking_trips.push(InternalTripIdSearch {
+                                    trip_id: possible_trip_id.clone(),
+                                    service_date: *valid_service_date,
+                                    trip_start_time: trip_start_time});
+                            }
+                        }
+    
+                       
+                        }
+    
+                        
+                    }       
                 }
+
+                ranking_trips.sort_by_key(|x| (current_chicago_time() - x.trip_start_time).abs());
+
+                let train_trip_id = ranking_trips.first().map(|x| x.trip_id.clone());
+                
 
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
@@ -310,40 +415,39 @@ pub async fn train_feed(
                                         arrival: Some(StopTimeEvent {
                                             delay: None,
                                             time: timestamp_from_str(&prediction.arrt),
-                                            uncertainty: None
+                                            uncertainty: None,
+                                            scheduled_time: None,
                                         }),
                                         departure: None,
                                         departure_occupancy_status: None,
                                         schedule_relationship: None,
-                                        stop_time_properties: None
-
-                                        // Most of these fields are still experimental and not part of the rust library yet
-                                        // stop_time_properties: Some(StopTimeProperties {
-                                        //     assigned_stop_id: None,
-                                        //     stop_headsign: &prediction.dest_nm,
-                                        //     drop_off_type: None,
-                                        //     pickup_type: None
-                                        // })
+                                        stop_time_properties: None, // Most of these fields are still experimental and not part of the rust library yet
+                                                                    // stop_time_properties: Some(StopTimeProperties {
+                                                                    //     assigned_stop_id: None,
+                                                                    //     stop_headsign: &prediction.dest_nm,
+                                                                    //     drop_off_type: None,
+                                                                    //     pickup_type: None
+                                                                    // })
                                     };
-                        
+
                                     stop_time_updates.push(update);
                                 }
                             } else {
-                                stop_time_updates.push(
-                                    StopTimeUpdate {
-                                        stop_sequence: None,
-                                        stop_id: Some(train.next_stp_id.clone()),
-                                        arrival: Some(StopTimeEvent {
-                                            delay: None,
-                                            time: timestamp_from_str(&train.arrt),
-                                            uncertainty: None
-                                        }),
-                                        departure: None,
-                                        departure_occupancy_status: None,
-                                        schedule_relationship: None,
-                                        stop_time_properties: None
-                                    }
-                                    );
+                                stop_time_updates.push(StopTimeUpdate {
+                                    stop_sequence: None,
+                                    stop_id: Some(train.next_stp_id.clone()),
+                                    arrival: Some(StopTimeEvent {
+                                        delay: None,
+                                        time: timestamp_from_str(&train.arrt),
+                                        uncertainty: None,
+
+                                        scheduled_time: None,
+                                    }),
+                                    departure: None,
+                                    departure_occupancy_status: None,
+                                    schedule_relationship: None,
+                                    stop_time_properties: None,
+                                });
                             }
 
                             let pos_entity: FeedEntity = FeedEntity {
@@ -355,7 +459,7 @@ pub async fn train_feed(
                                 vehicle: Some(gtfs_realtime::VehiclePosition {
                                     trip: Some(gtfs_realtime::TripDescriptor {
                                         modified_trip: None,
-                                        trip_id: train_trip_id.cloned(),
+                                        trip_id: train_trip_id.clone(),
                                         route_id: Some(capitalize(&train_line_group.route_name)),
                                         direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
                                         start_time: None,
@@ -404,7 +508,7 @@ pub async fn train_feed(
                                 trip_update: Some(gtfs_realtime::TripUpdate {
                                     trip: (gtfs_realtime::TripDescriptor {
                                         modified_trip: None,
-                                        trip_id: train_trip_id.cloned(),
+                                        trip_id: train_trip_id.clone(),
                                         route_id: Some(capitalize(&train_line_group.route_name)),
                                         direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
                                         start_time: None,
@@ -444,6 +548,7 @@ pub async fn train_feed(
                 ),
                 gtfs_realtime_version: String::from("2.0"),
                 incrementality: None,
+                feed_version: None,
             },
         },
         trip_updates: gtfs_realtime::FeedMessage {
@@ -457,6 +562,7 @@ pub async fn train_feed(
                 ),
                 gtfs_realtime_version: String::from("2.0"),
                 incrementality: None,
+                feed_version: None,
             },
         },
     })
@@ -472,7 +578,10 @@ mod tests {
     #[tokio::test]
     async fn test_train_feed() {
         let trips_file_data = fs::read_to_string("static/trips.txt");
-        let stoptimes_file_data = fs::read_to_string("static/stop_times.txt");
+
+        println!("Reading gtfs data");
+        let gtfs_data = gtfs_structures::Gtfs::new("static/").unwrap();
+        println!("Finished reading gtfs data");
 
         let train_feeds = train_feed(
             &reqwest::ClientBuilder::new()
@@ -484,7 +593,7 @@ mod tests {
                 .unwrap(),
             "13f685e4b9054545b19470556103ec73",
             &trips_file_data.expect("Bad trips file"),
-            &stoptimes_file_data.expect("Bad stoptimes file"),
+            &gtfs_data,
         )
         .await;
 
