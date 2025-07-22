@@ -8,8 +8,8 @@ use gtfs_realtime::{stop, FeedEntity, FeedMessage};
 use inline_colorization::*;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -260,8 +260,8 @@ pub async fn train_feed(
                 .map(|x| x.service_id.clone())
                 .collect::<HashSet<String>>();
 
-
-            let mut service_ids_to_valid_dates: HashMap<String, Vec<chrono::NaiveDate>> = HashMap::new();
+            let mut service_ids_to_valid_dates: HashMap<String, Vec<chrono::NaiveDate>> =
+                HashMap::new();
 
             for service_id in service_ids_to_check {
                 let calendar_dates_for_service_id = gtfs.calendar_dates.get(&service_id);
@@ -314,10 +314,10 @@ pub async fn train_feed(
                     }
 
                     if allowed_date {
-                        
-                        service_ids_to_valid_dates.entry(service_id.clone())
-                        .or_default()
-                        .push(date_to_check);
+                        service_ids_to_valid_dates
+                            .entry(service_id.clone())
+                            .or_default()
+                            .push(date_to_check);
                     }
                 }
             }
@@ -345,39 +345,35 @@ pub async fn train_feed(
                 if let Some(possible_trip_ids) = possible_trip_ids {
                     for possible_trip_id in possible_trip_ids {
                         let check_trip = gtfs.trips.get(possible_trip_id);
-    
-                        if let Some(check_trip) = check_trip {
-                            let valid_service_dates = service_ids_to_valid_dates
-                            .get(check_trip.service_id.as_str());
-    
-                        if let Some(valid_service_dates) = valid_service_dates {
-                            for valid_service_date in valid_service_dates {
-                                let midnight_chicago_from_naive_date = midnight_chicago_from_naive_date(
-                                    *valid_service_date,
-                                );
-        
-        
-        
-                                let trip_start_time = midnight_chicago_from_naive_date + chrono::Duration::seconds(check_trip.stop_times[0].departure_time.unwrap().into());
 
-                                ranking_trips.push(InternalTripIdSearch {
-                                    trip_id: possible_trip_id.clone(),
-                                    service_date: *valid_service_date,
-                                    trip_start_time: trip_start_time});
+                        if let Some(check_trip) = check_trip {
+                            let valid_service_dates =
+                                service_ids_to_valid_dates.get(check_trip.service_id.as_str());
+
+                            if let Some(valid_service_dates) = valid_service_dates {
+                                for valid_service_date in valid_service_dates {
+                                    let midnight_chicago_from_naive_date =
+                                        midnight_chicago_from_naive_date(*valid_service_date);
+
+                                    let trip_start_time = midnight_chicago_from_naive_date
+                                        + chrono::Duration::seconds(
+                                            check_trip.stop_times[0].departure_time.unwrap().into(),
+                                        );
+
+                                    ranking_trips.push(InternalTripIdSearch {
+                                        trip_id: possible_trip_id.clone(),
+                                        service_date: *valid_service_date,
+                                        trip_start_time: trip_start_time,
+                                    });
+                                }
                             }
                         }
-    
-                       
-                        }
-    
-                        
-                    }       
+                    }
                 }
 
                 ranking_trips.sort_by_key(|x| (current_chicago_time() - x.trip_start_time).abs());
 
                 let train_trip_id = ranking_trips.first().map(|x| x.trip_id.clone());
-                
 
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
