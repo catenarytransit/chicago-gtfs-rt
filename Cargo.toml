@@ -10,7 +10,7 @@ description = "Conversion of all Chicago Transit Authority data into GTFS Realti
 
 [dependencies]
 gtfs-realtime = "0.2.0"
-reqwest = {version = "0.12.22", features = ["deflate","gzip","brotli","rustls-tls"]}
+reqwest = {version = "0.12.23", features = ["deflate","gzip","brotli","rustls-tls"]}
 inline_colorization = "0.1.6"
 serde = {version = "1.0", features = ["derive"]}
 serde_json = "1.0"
