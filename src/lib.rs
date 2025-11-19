@@ -1,12 +1,14 @@
 use chrono::Datelike;
 use chrono::{DateTime, NaiveDateTime, TimeZone};
 use chrono_tz::America::Chicago;
+use core::time;
 use gtfs_realtime::alert::{Cause, Effect, SeverityLevel};
 use gtfs_realtime::translated_string::Translation;
-use core::time;
 use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
-use gtfs_realtime::{Alert, EntitySelector, FeedEntity, FeedMessage, TimeRange, TranslatedString, stop};
+use gtfs_realtime::{
+    stop, Alert, EntitySelector, FeedEntity, FeedMessage, TimeRange, TranslatedString,
+};
 use inline_colorization::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -143,7 +145,7 @@ struct CTAAlertsInner {
     #[serde(rename(deserialize = "TimeStamp"))]
     time_stamp: String,
     #[serde(rename(deserialize = "ErrorCode"))]
-    error_code: i64,
+    error_code: String,
     #[serde(rename(deserialize = "ErrorMessage"))]
     error_message: Option<String>,
     #[serde(rename(deserialize = "Alert"))]
@@ -189,7 +191,7 @@ struct CTAAlert {
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct CTAAlertImpactedService {
     #[serde(rename(deserialize = "Service"))]
-    service: Vec<CTAAlertImpactedServiceInner>,
+    service: serde_json::Value,
 }
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -257,10 +259,10 @@ fn timestamp_from_str_u64(timestamp: &str) -> Option<u64> {
 
 fn english_only_translations(text: String) -> TranslatedString {
     TranslatedString {
-            translation: vec![Translation {
+        translation: vec![Translation {
             text: text,
             language: Some("en_US".to_string()),
-        }]
+        }],
     }
 }
 
@@ -642,10 +644,7 @@ pub async fn train_feed(
     // Query CTA Customer Alerts API for alerts
     let response = client
         .get("https://www.transitchicago.com/api/1.0/alerts.aspx")
-        .query(&[
-            ("outputType", &"JSON"),
-            ("activeonly", &"true"),
-        ])
+        .query(&[("outputType", &"JSON"), ("activeonly", &"true")])
         .send()
         .await;
 
@@ -662,32 +661,61 @@ pub async fn train_feed(
     let alerts_data = json_output.cta_alerts.alert;
 
     for alert in alerts_data {
-        let active_period: Vec<TimeRange> = vec![
-            TimeRange {
-                start: match alert.event_start {
-                    Some(start) => timestamp_from_str_u64(&start),
-                    None => None
-                },
-                end: match alert.event_end {
-                    Some(end) => timestamp_from_str_u64(&end),
-                    None => None
-                },
-            }
-        ];
+        let active_period: Vec<TimeRange> = vec![TimeRange {
+            start: match alert.event_start {
+                Some(start) => timestamp_from_str_u64(&start),
+                None => None,
+            },
+            end: match alert.event_end {
+                Some(end) => timestamp_from_str_u64(&end),
+                None => None,
+            },
+        }];
 
         let mut informed_entity: Vec<EntitySelector> = Vec::new();
-        for impacted_service in alert.impacted_service.service {
-            if impacted_service.service_type == "T" {
-                informed_entity.push(EntitySelector {
-                    stop_id: Some(impacted_service.service_id),
-                    ..EntitySelector::default()                 
-                });
-            } else {
-                informed_entity.push(EntitySelector {
-                    route_id: Some(impacted_service.service_id),
-                    ..EntitySelector::default()
-                });
+
+        match alert.impacted_service.service {
+            serde_json::Value::Object(ref map) => {
+                let service = serde_json::from_value::<CTAAlertImpactedServiceInner>(
+                    alert.impacted_service.service.clone(),
+                );
+
+                if let Ok(service) = service {
+                    if service.service_type == "T" {
+                        informed_entity.push(EntitySelector {
+                            stop_id: Some(service.service_id),
+                            ..EntitySelector::default()
+                        });
+                    } else {
+                        informed_entity.push(EntitySelector {
+                            route_id: Some(service.service_id),
+                            ..EntitySelector::default()
+                        });
+                    }
+                }
             }
+            serde_json::Value::Array(ref arr) => {
+                for service_value in arr {
+                    let service = serde_json::from_value::<CTAAlertImpactedServiceInner>(
+                        service_value.clone(),
+                    );
+
+                    if let Ok(service) = service {
+                        if service.service_type == "T" {
+                            informed_entity.push(EntitySelector {
+                                stop_id: Some(service.service_id),
+                                ..EntitySelector::default()
+                            });
+                        } else {
+                            informed_entity.push(EntitySelector {
+                                route_id: Some(service.service_id),
+                                ..EntitySelector::default()
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
 
         let effect = match alert.impact.as_str() {
@@ -725,7 +753,7 @@ pub async fn train_feed(
         };
 
         alerts.push(FeedEntity {
-            id: alert.guid, 
+            id: alert.guid,
             is_deleted: None,
             trip_update: None,
             vehicle: None,
@@ -747,7 +775,7 @@ pub async fn train_feed(
             }),
             shape: None,
             stop: None,
-            trip_modifications: None
+            trip_modifications: None,
         });
     }
 
@@ -824,9 +852,8 @@ mod tests {
             &trips_file_data.expect("Bad trips file"),
             &gtfs_data,
         )
-        .await;
-
-        assert!(train_feeds.is_ok());
+        .await
+        .unwrap();
 
         println!("{:#?}", train_feeds);
     }
