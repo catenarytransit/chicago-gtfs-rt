@@ -1,10 +1,12 @@
 use chrono::Datelike;
 use chrono::{DateTime, NaiveDateTime, TimeZone};
 use chrono_tz::America::Chicago;
+use gtfs_realtime::alert::{Cause, Effect, SeverityLevel};
+use gtfs_realtime::translated_string::Translation;
 use core::time;
 use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
-use gtfs_realtime::{stop, FeedEntity, FeedMessage};
+use gtfs_realtime::{Alert, EntitySelector, FeedEntity, FeedMessage, TimeRange, TranslatedString, stop};
 use inline_colorization::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -22,6 +24,7 @@ pub fn capitalize(s: &str) -> String {
 pub struct ChicagoResults {
     pub vehicle_positions: FeedMessage,
     pub trip_updates: FeedMessage,
+    pub alerts: FeedMessage,
 }
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -123,6 +126,90 @@ struct TTFollowPrediction {
     flags: Option<String>,
 }
 
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CDATAWrapper {
+    #[serde(rename(deserialize = "#cdata-section"))]
+    cdata_section: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CTAAlerts {
+    #[serde(rename(deserialize = "CTAAlerts"))]
+    cta_alerts: CTAAlertsInner,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CTAAlertsInner {
+    #[serde(rename(deserialize = "TimeStamp"))]
+    time_stamp: String,
+    #[serde(rename(deserialize = "ErrorCode"))]
+    error_code: i64,
+    #[serde(rename(deserialize = "ErrorMessage"))]
+    error_message: Option<String>,
+    #[serde(rename(deserialize = "Alert"))]
+    alert: Vec<CTAAlert>,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CTAAlert {
+    #[serde(rename(deserialize = "AlertId"))]
+    alert_id: String,
+    #[serde(rename(deserialize = "Headline"))]
+    headline: String,
+    #[serde(rename(deserialize = "ShortDescription"))]
+    short_description: Option<String>,
+    #[serde(rename(deserialize = "FullDescription"))]
+    full_description: CDATAWrapper,
+    #[serde(rename(deserialize = "SeverityScore"))]
+    severity_score: String,
+    #[serde(rename(deserialize = "SeverityColor"))]
+    severity_color: String,
+    #[serde(rename(deserialize = "SeverityCSS"))]
+    severity_css: String,
+    #[serde(rename(deserialize = "Impact"))]
+    impact: String,
+    #[serde(rename(deserialize = "EventStart"))]
+    event_start: Option<String>,
+    #[serde(rename(deserialize = "EventEnd"))]
+    event_end: Option<String>,
+    #[serde(rename(deserialize = "TBD"))]
+    tbd: String,
+    #[serde(rename(deserialize = "MajorAlert"))]
+    major_alert: String,
+    #[serde(rename(deserialize = "AlertURL"))]
+    alert_url: CDATAWrapper,
+    #[serde(rename(deserialize = "ImpactedService"))]
+    impacted_service: CTAAlertImpactedService,
+    #[serde(rename(deserialize = "ttim"))]
+    ttim: String,
+    #[serde(rename(deserialize = "GUID"))]
+    guid: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CTAAlertImpactedService {
+    #[serde(rename(deserialize = "Service"))]
+    service: Vec<CTAAlertImpactedServiceInner>,
+}
+
+#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
+struct CTAAlertImpactedServiceInner {
+    #[serde(rename(deserialize = "ServiceType"))]
+    service_type: String,
+    #[serde(rename(deserialize = "ServiceTypeDescription"))]
+    service_type_description: String,
+    #[serde(rename(deserialize = "ServiceName"))]
+    service_name: String,
+    #[serde(rename(deserialize = "ServiceId"))]
+    service_id: String,
+    #[serde(rename(deserialize = "ServiceBackColor"))]
+    service_back_color: String,
+    #[serde(rename(deserialize = "ServiceTextColor"))]
+    service_text_color: String,
+    #[serde(rename(deserialize = "ServiceURL"))]
+    service_url: CDATAWrapper,
+}
+
 struct InternalTripIdSearch {
     trip_id: String,
     service_date: chrono::NaiveDate,
@@ -156,6 +243,25 @@ fn timestamp_from_str(timestamp: &str) -> Option<i64> {
         .single()?;
 
     Some(time.timestamp())
+}
+
+fn timestamp_from_str_u64(timestamp: &str) -> Option<u64> {
+    let naive_time = chrono::NaiveDateTime::parse_from_str(&timestamp, "%Y-%m-%dT%H:%M:%S").ok()?;
+
+    let time = chrono_tz::America::Chicago
+        .from_local_datetime(&naive_time)
+        .single()?;
+
+    Some(time.timestamp() as u64)
+}
+
+fn english_only_translations(text: String) -> TranslatedString {
+    TranslatedString {
+            translation: vec![Translation {
+            text: text,
+            language: Some("en_US".to_string()),
+        }]
+    }
 }
 
 pub async fn train_feed(
@@ -215,6 +321,7 @@ pub async fn train_feed(
 
     let mut train_positions: Vec<FeedEntity> = vec![];
     let mut trip_updates: Vec<FeedEntity> = vec![];
+    let mut alerts: Vec<FeedEntity> = vec![];
 
     for train_line_group in ttpositions.route {
         if let Some(train_value) = train_line_group.train {
@@ -532,6 +639,118 @@ pub async fn train_feed(
         }
     }
 
+    // Query CTA Customer Alerts API for alerts
+    let response = client
+        .get("https://www.transitchicago.com/api/1.0/alerts.aspx")
+        .query(&[
+            ("outputType", &"JSON"),
+            ("activeonly", &"true"),
+        ])
+        .send()
+        .await;
+
+    if let Err(response) = &response {
+        println!(
+            "{color_magenta}{:#?}{color_reset}",
+            response.url().unwrap().as_str()
+        );
+    }
+
+    let response = response?;
+    let text = response.text().await?;
+    let json_output = serde_json::from_str::<CTAAlerts>(text.as_str())?;
+    let alerts_data = json_output.cta_alerts.alert;
+
+    for alert in alerts_data {
+        let active_period: Vec<TimeRange> = vec![
+            TimeRange {
+                start: match alert.event_start {
+                    Some(start) => timestamp_from_str_u64(&start),
+                    None => None
+                },
+                end: match alert.event_end {
+                    Some(end) => timestamp_from_str_u64(&end),
+                    None => None
+                },
+            }
+        ];
+
+        let mut informed_entity: Vec<EntitySelector> = Vec::new();
+        for impacted_service in alert.impacted_service.service {
+            if impacted_service.service_type == "T" {
+                informed_entity.push(EntitySelector {
+                    stop_id: Some(impacted_service.service_id),
+                    ..EntitySelector::default()                 
+                });
+            } else {
+                informed_entity.push(EntitySelector {
+                    route_id: Some(impacted_service.service_id),
+                    ..EntitySelector::default()
+                });
+            }
+        }
+
+        let effect = match alert.impact.as_str() {
+            "Bus Stop Note" => Effect::StopMoved,
+            "Bus Stop Relocation" => Effect::StopMoved,
+            "Elevator Status" => Effect::AccessibilityIssue,
+            "Normal Service*" => Effect::NoEffect,
+            "Planned Reroute" => Effect::Detour,
+            "Planned Work" => Effect::ModifiedService,
+            "Service Change" => Effect::ModifiedService,
+            "Special Note" => Effect::UnknownEffect,
+            _ => Effect::UnknownEffect,
+            // TODO - The full list of allowed impacts is not documented
+            // This list was found by looking through the feed
+        };
+
+        let cause = Cause::UnknownCause;
+        let effect_detail = alert.impact;
+
+        let url = alert.alert_url.cdata_section;
+        let header_text = alert.headline;
+        let description_text = alert.short_description;
+
+        let severity_level = match alert.severity_css.as_str() {
+            "normal" => SeverityLevel::Info,
+            "planned" => SeverityLevel::Info,
+            "minor" => SeverityLevel::Warning,
+            "major" => SeverityLevel::Severe,
+            _ => SeverityLevel::UnknownSeverity,
+        };
+
+        let wrapped_description_text = match description_text {
+            Some(desc) => Some(english_only_translations(desc)),
+            None => None,
+        };
+
+        alerts.push(FeedEntity {
+            id: alert.guid, 
+            is_deleted: None,
+            trip_update: None,
+            vehicle: None,
+            alert: Some(Alert {
+                active_period: active_period,
+                informed_entity: informed_entity,
+                cause: Some(cause.into()),
+                effect: Some(effect.into()),
+                url: Some(english_only_translations(url)),
+                header_text: Some(english_only_translations(header_text.clone())),
+                description_text: wrapped_description_text.clone(),
+                tts_header_text: Some(english_only_translations(header_text.clone())),
+                tts_description_text: wrapped_description_text.clone(),
+                severity_level: Some(severity_level.into()),
+                image: None,
+                image_alternative_text: None,
+                cause_detail: None,
+                effect_detail: Some(english_only_translations(effect_detail)),
+            }),
+            shape: None,
+            stop: None,
+            trip_modifications: None
+        });
+    }
+
     Ok(ChicagoResults {
         vehicle_positions: gtfs_realtime::FeedMessage {
             entity: train_positions,
@@ -549,6 +768,20 @@ pub async fn train_feed(
         },
         trip_updates: gtfs_realtime::FeedMessage {
             entity: trip_updates,
+            header: gtfs_realtime::FeedHeader {
+                timestamp: Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_secs(),
+                ),
+                gtfs_realtime_version: String::from("2.0"),
+                incrementality: None,
+                feed_version: None,
+            },
+        },
+        alerts: gtfs_realtime::FeedMessage {
+            entity: alerts,
             header: gtfs_realtime::FeedHeader {
                 timestamp: Some(
                     SystemTime::now()
