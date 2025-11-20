@@ -22,4 +22,4 @@ gtfs-structures = "0.46"
 [dev-dependencies]
 zip = "6.0.0"
 zip-extract = "0.4.1"
-tokio = { features = ["full"], version = "1.46.1" }
+tokio = { features = ["full"], version = "1.48.0" }
