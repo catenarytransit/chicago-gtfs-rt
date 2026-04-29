@@ -7,7 +7,7 @@ use gtfs_realtime::translated_string::Translation;
 use gtfs_realtime::trip_update::stop_time_update::StopTimeProperties;
 use gtfs_realtime::trip_update::{StopTimeEvent, StopTimeUpdate};
 use gtfs_realtime::{
-    stop, Alert, EntitySelector, FeedEntity, FeedMessage, TimeRange, TranslatedString,
+    Alert, EntitySelector, FeedEntity, FeedMessage, TimeRange, TranslatedString, stop,
 };
 use inline_colorization::*;
 use serde::Deserialize;
