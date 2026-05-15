@@ -11,9 +11,48 @@ use gtfs_realtime::{
 };
 use inline_colorization::*;
 use serde::Deserialize;
+use serde::Deserializer;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn deserialize_one_or_many_vec<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        One(T),
+        Many(Vec<T>),
+    }
+
+    match OneOrMany::<T>::deserialize(deserializer)? {
+        OneOrMany::One(x) => Ok(vec![x]),
+        OneOrMany::Many(xs) => Ok(xs),
+    }
+}
+
+fn deserialize_one_or_many<'de, T, D>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany<T> {
+        One(T),
+        Many(Vec<T>),
+    }
+
+    // Safely parse it out as an optional OneOrMany enum
+    match Option::<OneOrMany<T>>::deserialize(deserializer)? {
+        Some(OneOrMany::One(x)) => Ok(Some(vec![x])),
+        Some(OneOrMany::Many(xs)) => Ok(Some(xs)),
+        None => Ok(None),
+    }
+}
 
 pub fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -90,6 +129,7 @@ struct TTFollowInner {
     #[serde(rename(deserialize = "errNm"))]
     err_nm: Option<String>,
     position: Option<TTFollowPosition>,
+    #[serde(default, deserialize_with = "deserialize_one_or_many")]
     eta: Option<Vec<TTFollowPrediction>>,
 }
 
@@ -145,11 +185,14 @@ struct CTAAlertsInner {
     #[serde(rename(deserialize = "TimeStamp"))]
     time_stamp: String,
     #[serde(rename(deserialize = "ErrorCode"))]
-    error_code: i64,
+    error_code: String,
     #[serde(rename(deserialize = "ErrorMessage"))]
     error_message: Option<String>,
-    #[serde(rename(deserialize = "Alert"))]
-    alert: Vec<CTAAlert>,
+    #[serde(
+        rename(deserialize = "Alert"),
+        deserialize_with = "deserialize_one_or_many"
+    )]
+    alert: Option<Vec<CTAAlert>>,
 }
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
@@ -190,7 +233,10 @@ struct CTAAlert {
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 struct CTAAlertImpactedService {
-    #[serde(rename(deserialize = "Service"))]
+    #[serde(
+        rename(deserialize = "Service"),
+        deserialize_with = "deserialize_one_or_many_vec"
+    )]
     service: Vec<CTAAlertImpactedServiceInner>,
 }
 
@@ -305,6 +351,7 @@ pub async fn train_feed(
         .await;
 
     //println!("Got response");
+    println!("Initial TT positions fetched");
 
     if let Err(response) = &response {
         println!(
@@ -324,6 +371,8 @@ pub async fn train_feed(
     let mut train_positions: Vec<FeedEntity> = vec![];
     let mut trip_updates: Vec<FeedEntity> = vec![];
     let mut alerts: Vec<FeedEntity> = vec![];
+
+    let mut train_futures = vec![];
 
     for train_line_group in ttpositions.route {
         if let Some(train_value) = train_line_group.train {
@@ -431,7 +480,7 @@ pub async fn train_feed(
                 }
             }
 
-            for train in &train_data_vec {
+            for train in train_data_vec {
                 let lat = train.lat.parse::<f32>();
                 let lon = train.lon.parse::<f32>();
 
@@ -487,157 +536,183 @@ pub async fn train_feed(
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
                         if let Ok(lon) = lon {
-                            let response = client
-                                .get("https://www.transitchicago.com/api/1.0/ttfollow.aspx")
-                                .query(&[
-                                    ("key", &key),
-                                    ("runnumber", &train.rn.as_str()),
-                                    ("outputType", &"JSON"),
-                                ])
-                                .send()
-                                .await;
+                            let client = client.clone();
+                            let query_key = key.to_string();
+                            let route_name = train_line_group.route_name.clone();
+                            train_futures.push(async move {
+                                let response = client
+                                    .get("https://www.transitchicago.com/api/1.0/ttfollow.aspx")
+                                    .query(&[
+                                        ("key", query_key.as_str()),
+                                        ("runnumber", train.rn.as_str()),
+                                        ("outputType", "JSON"),
+                                    ])
+                                    .send()
+                                    .await;
 
-                            if let Err(response) = &response {
-                                println!(
-                                    "{color_magenta}{:#?}{color_reset}",
-                                    response.url().unwrap().as_str()
-                                );
-                                //  println!("{:?}", response);
-                            }
+                                if let Err(response) = &response {
+                                    println!(
+                                        "{color_magenta}{:#?}{color_reset}",
+                                        response.url().unwrap().as_str()
+                                    );
+                                    //  println!("{:?}", response);
+                                }
 
-                            let response = response?;
-                            let text = response.text().await?;
-                            let json_output = serde_json::from_str::<TTFollow>(text.as_str())?;
-                            let ttfollow = json_output.ctatt;
+                                let response = response?;
+                                let text = response.text().await?;
 
-                            let mut stop_time_updates = Vec::new();
+                                //println!("TTFollow: {} {:?}", train.rn.as_str(), text);
 
-                            if let Some(eta) = ttfollow.eta {
-                                for prediction in eta {
-                                    let update = StopTimeUpdate {
+                                let json_output = serde_json::from_str::<TTFollow>(text.as_str());
+
+                                if let Err(err) = &json_output {
+                                    eprintln!("TTFollow deserialise fail {:#?}", err);
+                                }
+
+                                let json_output = json_output?;
+
+                                let ttfollow = json_output.ctatt;
+
+                                let mut stop_time_updates = Vec::new();
+
+                                if let Some(eta) = ttfollow.eta {
+                                    for prediction in eta {
+                                        let update = StopTimeUpdate {
+                                            stop_sequence: None,
+                                            stop_id: Some(prediction.stp_id.clone()),
+                                            arrival: Some(StopTimeEvent {
+                                                delay: None,
+                                                time: timestamp_from_str(&prediction.arrt),
+                                                uncertainty: None,
+                                                scheduled_time: None,
+                                            }),
+                                            departure: None,
+                                            departure_occupancy_status: None,
+                                            schedule_relationship: None,
+                                            stop_time_properties: None, // Most of these fields are still experimental and not part of the rust library yet
+                                                                        // stop_time_properties: Some(StopTimeProperties {
+                                                                        //     assigned_stop_id: None,
+                                                                        //     stop_headsign: &prediction.dest_nm,
+                                                                        //     drop_off_type: None,
+                                                                        //     pickup_type: None
+                                                                        // })
+                                        };
+
+                                        stop_time_updates.push(update);
+                                    }
+                                } else {
+                                    stop_time_updates.push(StopTimeUpdate {
                                         stop_sequence: None,
-                                        stop_id: Some(prediction.stp_id.clone()),
+                                        stop_id: Some(train.next_stp_id.clone()),
                                         arrival: Some(StopTimeEvent {
                                             delay: None,
-                                            time: timestamp_from_str(&prediction.arrt),
+                                            time: timestamp_from_str(&train.arrt),
                                             uncertainty: None,
+
                                             scheduled_time: None,
                                         }),
                                         departure: None,
                                         departure_occupancy_status: None,
                                         schedule_relationship: None,
-                                        stop_time_properties: None, // Most of these fields are still experimental and not part of the rust library yet
-                                                                    // stop_time_properties: Some(StopTimeProperties {
-                                                                    //     assigned_stop_id: None,
-                                                                    //     stop_headsign: &prediction.dest_nm,
-                                                                    //     drop_off_type: None,
-                                                                    //     pickup_type: None
-                                                                    // })
-                                    };
-
-                                    stop_time_updates.push(update);
+                                        stop_time_properties: None,
+                                    });
                                 }
-                            } else {
-                                stop_time_updates.push(StopTimeUpdate {
-                                    stop_sequence: None,
-                                    stop_id: Some(train.next_stp_id.clone()),
-                                    arrival: Some(StopTimeEvent {
+
+                                let pos_entity: FeedEntity = FeedEntity {
+                                    id: train.rn.clone(),
+                                    stop: None,
+                                    trip_modifications: None,
+                                    is_deleted: None,
+                                    trip_update: None,
+                                    vehicle: Some(gtfs_realtime::VehiclePosition {
+                                        trip: Some(gtfs_realtime::TripDescriptor {
+                                            modified_trip: None,
+                                            trip_id: train_trip_id.clone(),
+                                            route_id: Some(capitalize(&route_name)),
+                                            direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
+                                            start_time: None,
+                                            start_date: None,
+                                            schedule_relationship: None,
+                                        }),
+                                        vehicle: Some(gtfs_realtime::VehicleDescriptor {
+                                            id: Some(train.rn.clone()),
+                                            label: None,
+                                            license_plate: None,
+                                            wheelchair_accessible: None,
+                                        }),
+                                        position: Some(gtfs_realtime::Position {
+                                            latitude: lat,
+                                            longitude: lon,
+                                            bearing: match train.heading.parse::<f32>() {
+                                                Ok(bearing) => Some(bearing),
+                                                _ => None,
+                                            },
+                                            odometer: None,
+                                            speed: None,
+                                        }),
+                                        current_status: None,
+                                        current_stop_sequence: None,
+                                        stop_id: None,
+                                        timestamp: timestamp_from_str(&ttfollow.tmst)
+                                            .map(|i| i as u64),
+                                        congestion_level: None,
+                                        occupancy_percentage: None,
+                                        occupancy_status: None,
+                                        multi_carriage_details: vec![],
+                                    }),
+                                    alert: None,
+                                    shape: None,
+                                };
+
+                                let trip_entity: FeedEntity = FeedEntity {
+                                    id: train.rn.clone(),
+                                    vehicle: None,
+                                    alert: None,
+                                    shape: None,
+                                    stop: None,
+                                    trip_modifications: None,
+                                    is_deleted: None,
+                                    trip_update: Some(gtfs_realtime::TripUpdate {
+                                        trip: (gtfs_realtime::TripDescriptor {
+                                            modified_trip: None,
+                                            trip_id: train_trip_id.clone(),
+                                            route_id: Some(capitalize(&route_name)),
+                                            direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
+                                            start_time: None,
+                                            start_date: None,
+                                            schedule_relationship: None,
+                                        }),
+                                        vehicle: Some(gtfs_realtime::VehicleDescriptor {
+                                            id: Some(train.rn.clone()),
+                                            label: None,
+                                            license_plate: None,
+                                            wheelchair_accessible: None,
+                                        }),
+                                        stop_time_update: stop_time_updates,
+                                        timestamp: timestamp_from_str(&ttfollow.tmst)
+                                            .map(|i| i as u64),
                                         delay: None,
-                                        time: timestamp_from_str(&train.arrt),
-                                        uncertainty: None,
+                                        trip_properties: None,
+                                    }),
+                                };
 
-                                        scheduled_time: None,
-                                    }),
-                                    departure: None,
-                                    departure_occupancy_status: None,
-                                    schedule_relationship: None,
-                                    stop_time_properties: None,
-                                });
-                            }
-
-                            let pos_entity: FeedEntity = FeedEntity {
-                                id: train.rn.clone(),
-                                stop: None,
-                                trip_modifications: None,
-                                is_deleted: None,
-                                trip_update: None,
-                                vehicle: Some(gtfs_realtime::VehiclePosition {
-                                    trip: Some(gtfs_realtime::TripDescriptor {
-                                        modified_trip: None,
-                                        trip_id: train_trip_id.clone(),
-                                        route_id: Some(capitalize(&train_line_group.route_name)),
-                                        direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
-                                        start_time: None,
-                                        start_date: None,
-                                        schedule_relationship: None,
-                                    }),
-                                    vehicle: Some(gtfs_realtime::VehicleDescriptor {
-                                        id: Some(train.rn.clone()),
-                                        label: None,
-                                        license_plate: None,
-                                        wheelchair_accessible: None,
-                                    }),
-                                    position: Some(gtfs_realtime::Position {
-                                        latitude: lat,
-                                        longitude: lon,
-                                        bearing: match train.heading.parse::<f32>() {
-                                            Ok(bearing) => Some(bearing),
-                                            _ => None,
-                                        },
-                                        odometer: None,
-                                        speed: None,
-                                    }),
-                                    current_status: None,
-                                    current_stop_sequence: None,
-                                    stop_id: None,
-                                    timestamp: timestamp_from_str(&ttfollow.tmst).map(|i| i as u64),
-                                    congestion_level: None,
-                                    occupancy_percentage: None,
-                                    occupancy_status: None,
-                                    multi_carriage_details: vec![],
-                                }),
-                                alert: None,
-                                shape: None,
-                            };
-
-                            train_positions.push(pos_entity);
-
-                            let trip_entity: FeedEntity = FeedEntity {
-                                id: train.rn.clone(),
-                                vehicle: None,
-                                alert: None,
-                                shape: None,
-                                stop: None,
-                                trip_modifications: None,
-                                is_deleted: None,
-                                trip_update: Some(gtfs_realtime::TripUpdate {
-                                    trip: (gtfs_realtime::TripDescriptor {
-                                        modified_trip: None,
-                                        trip_id: train_trip_id.clone(),
-                                        route_id: Some(capitalize(&train_line_group.route_name)),
-                                        direction_id: Some(train.tr_dr.parse::<u32>().unwrap()),
-                                        start_time: None,
-                                        start_date: None,
-                                        schedule_relationship: None,
-                                    }),
-                                    vehicle: Some(gtfs_realtime::VehicleDescriptor {
-                                        id: Some(train.rn.clone()),
-                                        label: None,
-                                        license_plate: None,
-                                        wheelchair_accessible: None,
-                                    }),
-                                    stop_time_update: stop_time_updates,
-                                    timestamp: timestamp_from_str(&ttfollow.tmst).map(|i| i as u64),
-                                    delay: None,
-                                    trip_properties: None,
-                                }),
-                            };
-
-                            trip_updates.push(trip_entity);
+                                Ok::<_, Box<dyn std::error::Error + Sync + Send>>(Some((
+                                    pos_entity,
+                                    trip_entity,
+                                )))
+                            });
                         }
                     }
                 }
             }
+        }
+    }
+
+    let results = futures::future::join_all(train_futures).await;
+    for res in results {
+        if let Some((pos_entity, trip_entity)) = res? {
+            train_positions.push(pos_entity);
+            trip_updates.push(trip_entity);
         }
     }
 
@@ -657,95 +732,105 @@ pub async fn train_feed(
 
     let response = response?;
     let text = response.text().await?;
-    let json_output = serde_json::from_str::<CTAAlerts>(text.as_str())?;
+
+    let json_output = serde_json::from_str::<CTAAlerts>(text.as_str());
+
+    if let Err(err) = &json_output {
+        eprintln!("Alerts deserialise fail {:#?}", err);
+    }
+
+    let json_output = json_output?;
+
     let alerts_data = json_output.cta_alerts.alert;
 
-    for alert in alerts_data {
-        let active_period: Vec<TimeRange> = vec![TimeRange {
-            start: match alert.event_start {
-                Some(start) => timestamp_from_str_u64(&start),
-                None => None,
-            },
-            end: match alert.event_end {
-                Some(end) => timestamp_from_str_u64(&end),
-                None => None,
-            },
-        }];
+    if let Some(alerts_data) = alerts_data {
+        for alert in alerts_data {
+            let active_period: Vec<TimeRange> = vec![TimeRange {
+                start: match alert.event_start {
+                    Some(start) => timestamp_from_str_u64(&start),
+                    None => None,
+                },
+                end: match alert.event_end {
+                    Some(end) => timestamp_from_str_u64(&end),
+                    None => None,
+                },
+            }];
 
-        let mut informed_entity: Vec<EntitySelector> = Vec::new();
-        for impacted_service in alert.impacted_service.service {
-            if impacted_service.service_type == "T" {
-                informed_entity.push(EntitySelector {
-                    stop_id: Some(impacted_service.service_id),
-                    ..EntitySelector::default()
-                });
-            } else {
-                informed_entity.push(EntitySelector {
-                    route_id: Some(impacted_service.service_id),
-                    ..EntitySelector::default()
-                });
+            let mut informed_entity: Vec<EntitySelector> = Vec::new();
+            for impacted_service in alert.impacted_service.service {
+                if impacted_service.service_type == "T" {
+                    informed_entity.push(EntitySelector {
+                        stop_id: Some(impacted_service.service_id),
+                        ..EntitySelector::default()
+                    });
+                } else {
+                    informed_entity.push(EntitySelector {
+                        route_id: Some(impacted_service.service_id),
+                        ..EntitySelector::default()
+                    });
+                }
             }
+
+            let effect = match alert.impact.as_str() {
+                "Bus Stop Note" => Effect::StopMoved,
+                "Bus Stop Relocation" => Effect::StopMoved,
+                "Elevator Status" => Effect::AccessibilityIssue,
+                "Normal Service*" => Effect::NoEffect,
+                "Planned Reroute" => Effect::Detour,
+                "Planned Work" => Effect::ModifiedService,
+                "Service Change" => Effect::ModifiedService,
+                "Special Note" => Effect::UnknownEffect,
+                _ => Effect::UnknownEffect,
+                // TODO - The full list of allowed impacts is not documented
+                // This list was found by looking through the feed
+            };
+
+            let cause = Cause::UnknownCause;
+            let effect_detail = alert.impact;
+
+            let url = alert.alert_url.cdata_section;
+            let header_text = alert.headline;
+            let description_text = alert.short_description;
+
+            let severity_level = match alert.severity_css.as_str() {
+                "normal" => SeverityLevel::Info,
+                "planned" => SeverityLevel::Info,
+                "minor" => SeverityLevel::Warning,
+                "major" => SeverityLevel::Severe,
+                _ => SeverityLevel::UnknownSeverity,
+            };
+
+            let wrapped_description_text = match description_text {
+                Some(desc) => Some(english_only_translations(desc)),
+                None => None,
+            };
+
+            alerts.push(FeedEntity {
+                id: alert.guid,
+                is_deleted: None,
+                trip_update: None,
+                vehicle: None,
+                alert: Some(Alert {
+                    active_period: active_period,
+                    informed_entity: informed_entity,
+                    cause: Some(cause.into()),
+                    effect: Some(effect.into()),
+                    url: Some(english_only_translations(url)),
+                    header_text: Some(english_only_translations(header_text.clone())),
+                    description_text: wrapped_description_text.clone(),
+                    tts_header_text: Some(english_only_translations(header_text.clone())),
+                    tts_description_text: wrapped_description_text.clone(),
+                    severity_level: Some(severity_level.into()),
+                    image: None,
+                    image_alternative_text: None,
+                    cause_detail: None,
+                    effect_detail: Some(english_only_translations(effect_detail)),
+                }),
+                shape: None,
+                stop: None,
+                trip_modifications: None,
+            });
         }
-
-        let effect = match alert.impact.as_str() {
-            "Bus Stop Note" => Effect::StopMoved,
-            "Bus Stop Relocation" => Effect::StopMoved,
-            "Elevator Status" => Effect::AccessibilityIssue,
-            "Normal Service*" => Effect::NoEffect,
-            "Planned Reroute" => Effect::Detour,
-            "Planned Work" => Effect::ModifiedService,
-            "Service Change" => Effect::ModifiedService,
-            "Special Note" => Effect::UnknownEffect,
-            _ => Effect::UnknownEffect,
-            // TODO - The full list of allowed impacts is not documented
-            // This list was found by looking through the feed
-        };
-
-        let cause = Cause::UnknownCause;
-        let effect_detail = alert.impact;
-
-        let url = alert.alert_url.cdata_section;
-        let header_text = alert.headline;
-        let description_text = alert.short_description;
-
-        let severity_level = match alert.severity_css.as_str() {
-            "normal" => SeverityLevel::Info,
-            "planned" => SeverityLevel::Info,
-            "minor" => SeverityLevel::Warning,
-            "major" => SeverityLevel::Severe,
-            _ => SeverityLevel::UnknownSeverity,
-        };
-
-        let wrapped_description_text = match description_text {
-            Some(desc) => Some(english_only_translations(desc)),
-            None => None,
-        };
-
-        alerts.push(FeedEntity {
-            id: alert.guid,
-            is_deleted: None,
-            trip_update: None,
-            vehicle: None,
-            alert: Some(Alert {
-                active_period: active_period,
-                informed_entity: informed_entity,
-                cause: Some(cause.into()),
-                effect: Some(effect.into()),
-                url: Some(english_only_translations(url)),
-                header_text: Some(english_only_translations(header_text.clone())),
-                description_text: wrapped_description_text.clone(),
-                tts_header_text: Some(english_only_translations(header_text.clone())),
-                tts_description_text: wrapped_description_text.clone(),
-                severity_level: Some(severity_level.into()),
-                image: None,
-                image_alternative_text: None,
-                cause_detail: None,
-                effect_detail: Some(english_only_translations(effect_detail)),
-            }),
-            shape: None,
-            stop: None,
-            trip_modifications: None,
-        });
     }
 
     Ok(ChicagoResults {
@@ -823,9 +908,17 @@ mod tests {
         )
         .await;
 
-        assert!(train_feeds.is_ok());
+        match &train_feeds {
+            Ok(train_feeds) => {
+                println!("{:#?}", train_feeds);
+            }
 
-        println!("{:#?}", train_feeds);
+            Err(err) => {
+                eprintln!("{:#?}", err);
+            }
+        }
+
+        assert!(train_feeds.is_ok());
     }
 
     /*
