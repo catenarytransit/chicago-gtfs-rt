@@ -402,19 +402,9 @@ pub async fn train_feed(
                 current_date.succ_opt().unwrap(),
             ];
 
-            let trip_ids_to_check = run_ids_to_trip_ids
+            let service_ids_to_check = gtfs
+                .trips
                 .values()
-                .flatten()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            let trip_raw_list = trip_ids_to_check
-                .iter()
-                .map(|trip_id| gtfs.trips.get(trip_id))
-                .filter(|x| x.is_some())
-                .map(|x| x.unwrap());
-
-            let service_ids_to_check = trip_raw_list
                 .map(|x| x.service_id.clone())
                 .collect::<HashSet<String>>();
 
@@ -531,7 +521,91 @@ pub async fn train_feed(
 
                 ranking_trips.sort_by_key(|x| (current_chicago_time() - x.trip_start_time).abs());
 
-                let train_trip_id = ranking_trips.first().map(|x| x.trip_id.clone());
+                let mut train_trip_id = None;
+                let mut bypass_run_number = true;
+
+                if let Some(best_candidate) = ranking_trips.first() {
+                    if let Some(best_trip) = gtfs.trips.get(&best_candidate.trip_id) {
+                        let matching_stop_time = best_trip.stop_times.iter().find(|st| {
+                            st.stop.id == train.next_stp_id
+                        });
+
+                        if let Some(stop_time) = matching_stop_time {
+                            if let Some(pred_ts) = timestamp_from_str(&train.arrt) {
+                                let scheduled_secs = stop_time.arrival_time
+                                    .or(stop_time.departure_time)
+                                    .unwrap_or(0);
+                                let midnight = midnight_chicago_from_naive_date(best_candidate.service_date);
+                                let scheduled_arrival_time = midnight + chrono::Duration::seconds(scheduled_secs as i64);
+                                let delay_mins = (pred_ts - scheduled_arrival_time.timestamp()) / 60;
+
+                                // Preserve run number mapping if delay is within expected margins (-20 min to +30 min).
+                                // If the run number was assigned prematurely by CTA before it exists in the schedule,
+                                // the computed delay will be highly anomalous, in which case we fall back to a route-wide
+                                // search matching the scheduled stop time closest to the predicted time.
+                                if delay_mins >= -20 && delay_mins <= 30 {
+                                    train_trip_id = Some(best_candidate.trip_id.clone());
+                                    bypass_run_number = false;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if bypass_run_number {
+                    let expected_route_id = capitalize(&train_line_group.route_name);
+                    let expected_dir = train.tr_dr.parse::<u32>().ok();
+
+                    let mut best_trip_match = None;
+                    let mut min_diff = i64::MAX;
+
+                    for trip in gtfs.trips.values() {
+                        if trip.route_id.to_lowercase() != expected_route_id.to_lowercase() {
+                            continue;
+                        }
+
+                        if let Some(expected_d) = expected_dir {
+                            let trip_dir = match &trip.direction_id {
+                                Some(gtfs_structures::DirectionType::Outbound) => Some(0),
+                                Some(gtfs_structures::DirectionType::Inbound) => Some(1),
+                                _ => None,
+                            };
+                            if let Some(td) = trip_dir {
+                                if td != expected_d {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if let Some(valid_service_dates) = service_ids_to_valid_dates.get(trip.service_id.as_str()) {
+                            for valid_service_date in valid_service_dates {
+                                let matching_stop_time = trip.stop_times.iter().find(|st| {
+                                    st.stop.id == train.next_stp_id
+                                });
+
+                                if let Some(stop_time) = matching_stop_time {
+                                    if let Some(pred_ts) = timestamp_from_str(&train.arrt) {
+                                        let scheduled_secs = stop_time.arrival_time
+                                            .or(stop_time.departure_time)
+                                            .unwrap_or(0);
+                                        let midnight = midnight_chicago_from_naive_date(*valid_service_date);
+                                        let scheduled_arrival_time = midnight + chrono::Duration::seconds(scheduled_secs as i64);
+                                        let diff = (pred_ts - scheduled_arrival_time.timestamp()).abs();
+
+                                        if diff < min_diff {
+                                            min_diff = diff;
+                                            best_trip_match = Some(trip.id.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(matched_id) = best_trip_match {
+                        train_trip_id = Some(matched_id);
+                    }
+                }
 
                 if train_trip_id.is_some() {
                     if let Ok(lat) = lat {
